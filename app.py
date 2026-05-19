@@ -729,4 +729,5 @@ if __name__ == "__main__":
     print("\n  UK 49s Intelligence Dashboard")
     print("  ─────────────────────────────")
     print("  Open http://localhost:5000 in your browser\n")
-    app.run(debug=False, port=5000)
+   # change the last line of app.py to:
+   app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
