@@ -1,3 +1,6 @@
+import io
+from flask import send_file
+from fpdf import FPDF
 """
 UK 49s Lunchtime & Teatime — Scraper + Analyser + Web Dashboard
 Run:  python app.py
@@ -153,27 +156,28 @@ def scrape(url: str) -> tuple:
         resp = requests.get(url, headers=HEADERS, timeout=12)
         resp.raise_for_status()
         soup  = BeautifulSoup(resp.text, "html.parser")
-        table = soup.find("table")
-        if not table:
-            raise ValueError("No table found")
+        tables = soup.find_all("table")
+        if not tables:
+            raise ValueError("No tables found")
         results = []
-        for row in table.find_all("tr"):
-            cells = row.find_all("td")
-            if len(cells) < 2:
-                continue
-            date_raw         = cells[0].get_text(strip=True)
-            numbers, booster = _parse_numbers(cells[1].get_text(" ", strip=True))
-            link_tag         = cells[2].find("a") if len(cells) > 2 else None
-            detail_url       = BASE_URL + link_tag["href"] if link_tag else None
-            if not numbers:
-                continue
-            results.append(DrawResult(
-                date_raw   = date_raw,
-                date       = _parse_date(date_raw),
-                numbers    = numbers,
-                booster    = booster,
-                detail_url = detail_url,
-            ))
+        for table in tables:
+            for row in table.find_all("tr"):
+                cells = row.find_all("td")
+                if len(cells) < 2:
+                    continue
+                date_raw         = cells[0].get_text(strip=True)
+                numbers, booster = _parse_numbers(cells[1].get_text(" ", strip=True))
+                link_tag         = cells[2].find("a") if len(cells) > 2 else None
+                detail_url       = BASE_URL + link_tag["href"] if link_tag else None
+                if not numbers:
+                    continue
+                results.append(DrawResult(
+                    date_raw   = date_raw,
+                    date       = _parse_date(date_raw),
+                    numbers    = numbers,
+                    booster    = booster,
+                    detail_url = detail_url,
+                ))
         if results:
             return results, True
         raise ValueError("Empty result set")
@@ -268,7 +272,26 @@ def analyse(draws: list) -> dict:
         colour_groups.setdefault(colour, []).append(tag)
         digit_groups.setdefault(n % 10, []).append(tag)
 
+    # Placeholder calculations for v, w, x, y, z and x1-x9
+    # (Formulas are illustrative as actuals were not provided)
+    b = sorted(balls)
+    x1, x2, x3, x4, x5, x6, x7 = (b + [0]*7)[:7]
+    x8 = (x1 + x2) % 50
+    x9 = (x6 + x7) % 50
+    v = (x1 + x2 + x3) % 50
+    w = (x4 + x5 + x6) % 50
+    x_val = (x7 + x8 + x9) % 50
+    y = (v + w) % 50
+    z = (w + x_val) % 50
+
+    calcs = {
+        "x1": x1, "x2": x2, "x3": x3, "x4": x4, "x5": x5,
+        "x6": x6, "x7": x7, "x8": x8, "x9": x9,
+        "v": v, "w": w, "x": x_val, "y": y, "z": z
+    }
+
     return {
+        "calcs"         : calcs,
         "total_draws"   : len(draws),
         "hot"           : hot,
         "cold"          : cold,
@@ -364,6 +387,54 @@ def _build_suggestions(hot: list, sets: dict, freq: Counter) -> list:
 # ─────────────────────────────────────────────────────────────────────────────
 # ROUTES
 # ─────────────────────────────────────────────────────────────────────────────
+
+@app.route("/api/export-pdf")
+def export_pdf():
+    lt_draws, _ = scrape(LUNCHTIME_URL)
+    analysis = analyse(lt_draws)
+
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("helvetica", "B", 16)
+    pdf.cell(190, 10, "UK 49s Intelligence - Number Combos", ln=True, align="C")
+    pdf.ln(10)
+
+    pdf.set_font("helvetica", "B", 12)
+    pdf.cell(190, 10, "Generated Sets", ln=True)
+    pdf.set_font("helvetica", "", 10)
+    for name, nums in analysis.get("sets", {}).items():
+        clean_name = name.replace("\u2014", "-")
+        pdf.cell(190, 8, f"{clean_name}: {', '.join(map(str, nums))}", ln=True)
+
+    pdf.ln(5)
+    pdf.set_font("helvetica", "B", 12)
+    pdf.cell(190, 10, "Combos by Colour Group", ln=True)
+    pdf.set_font("helvetica", "", 10)
+    for group in analysis.get("combos_colour", []):
+        pdf.cell(190, 8, f"Group {group['group']}:", ln=True)
+        for combo in group['combos']:
+            pdf.cell(190, 6, f"  - {' · '.join(combo)}", ln=True)
+
+    pdf.ln(5)
+    pdf.set_font("helvetica", "B", 12)
+    pdf.cell(190, 10, "Combos by Ending Digit", ln=True)
+    pdf.set_font("helvetica", "", 10)
+    for group in analysis.get("combos_digit", []):
+        pdf.cell(190, 8, f"Digit {group['group']}:", ln=True)
+        for combo in group['combos']:
+            pdf.cell(190, 6, f"  - {' · '.join(combo)}", ln=True)
+
+    buffer = io.BytesIO()
+    pdf_bytes = pdf.output()
+    buffer.write(pdf_bytes)
+    buffer.seek(0)
+
+    return send_file(
+        buffer,
+        as_attachment=True,
+        download_name="number_combos.pdf",
+        mimetype="application/pdf"
+    )
 
 @app.route("/")
 def index():
@@ -543,14 +614,12 @@ main{padding:26px 36px;max-width:1460px;margin:0 auto}
 </header>
 
 <nav>
-  <button class="tab active" onclick="showTab('results',this)">📋 Results</button>
-  <button class="tab" onclick="showTab('analysis',this)">📊 Analysis</button>
-  <button class="tab" onclick="showTab('suggestions',this)">💡 Suggestions</button>
-  <button class="tab" onclick="showTab('sets',this)">📐 Set Combos</button>
+  <button class="tab" onclick="showTab('results',this)">📋 Results</button>
+  <button class="tab active" onclick="showTab('analysis',this)">📊 Analysis</button>
 </nav>
 
 <main>
-  <div id="results" class="section active">
+  <div id="results" class="section">
     <div id="hero-block"></div>
     <div class="grid2">
       <div class="card"><div class="card-title">Lunchtime Results <span class="card-sub">Latest 25 draws</span></div><div id="table-lunch"><p class="no-data">Loading…</p></div></div>
@@ -558,25 +627,24 @@ main{padding:26px 36px;max-width:1460px;margin:0 auto}
     </div>
   </div>
 
-  <div id="analysis" class="section">
+  <div id="analysis" class="section active">
     <div class="stats-row" id="stats-row"></div>
+
+    <div id="lotto-calculations" class="card">
+        <div class="card-title">
+            🔢 Lotto Calculations
+            <button class="btn btn-primary" onclick="window.location.href='/api/export-pdf'">📄 Export PDF</button>
+        </div>
+        <div id="calc-block"></div>
+    </div>
+
     <div class="grid2">
       <div class="card"><div class="card-title">🔥 Hot &amp; ❄ Cold Numbers</div><div id="hot-cold"></div></div>
       <div class="card"><div class="card-title">🎨 Colour Band Distribution</div><div id="colour-dist"></div></div>
     </div>
     <div class="card"><div class="card-title">📊 Frequency Chart <span class="card-sub">Numbers 1–49 · all draws</span></div><div id="freq-chart"></div></div>
     <div class="card"><div class="card-title">🔢 Ending Digit Distribution</div><div id="digit-dist"></div></div>
-  </div>
 
-  <div id="suggestions" class="section">
-    <div class="card">
-      <div class="card-title">💡 Suggested Winning Combos</div>
-      <div class="disclaimer">⚠️ Suggestions are generated algorithmically from frequency data and set analysis. Lotteries are random — past results do not predict future draws. Play responsibly.</div>
-      <div id="sugs-list"></div>
-    </div>
-  </div>
-
-  <div id="sets" class="section">
     <div class="card">
       <div class="card-title">📐 Generated Sets <span class="card-sub">From latest draw · valid range 1–49</span></div>
       <div class="disclaimer">Sets S1–S5 are derived from arithmetic formulas applied to the most recent draw result. S4 requires a TSE code (not available from scraper) and is omitted.</div>
@@ -648,6 +716,15 @@ function renderAnalysis(a){
     <div class="stat-box"><div class="stat-val">${a.cold&&a.cold.length?a.cold[a.cold.length-1]:'—'}</div><div class="stat-lbl">Coldest Ball</div></div>
     <div class="stat-box"><div class="stat-val">${a.latest_numbers?a.latest_numbers.length:'—'}</div><div class="stat-lbl">Balls / Draw</div></div>`;
 
+  if (a.calcs) {
+    let ch = '<div class="stats-row">';
+    Object.entries(a.calcs).forEach(([k,v]) => {
+      ch += `<div class="stat-box"><div class="stat-val" style="font-size:1.2rem">${v}</div><div class="stat-lbl">${k}</div></div>`;
+    });
+    ch += '</div>';
+    document.getElementById('calc-block').innerHTML = ch;
+  }
+
   document.getElementById('hot-cold').innerHTML=`
     <div class="hc-wrap">
       <div class="hc-col"><div class="hc-label hot">🔥 Hot</div><div class="ball-row">${(a.hot||[]).map(n=>ball(n,'ball-sm')).join('')}</div></div>
@@ -713,7 +790,7 @@ async function loadData(){
     renderTable(data.teatime,'table-tea');
     const a=data.analysis;
     if(a&&Object.keys(a).length){
-      renderAnalysis(a);renderSuggestions(a.suggested);
+      renderAnalysis(a);
       renderSets(a.sets);renderCombos(a.combos_colour,'combos-colour');renderCombos(a.combos_digit,'combos-digit');
     }
   }catch(e){alert('Error: '+e.message);}
@@ -726,8 +803,8 @@ loadData();
 </html>"""
 
 if __name__ == "__main__":
+    import os
     print("\n  UK 49s Intelligence Dashboard")
     print("  ─────────────────────────────")
     print("  Open http://localhost:5000 in your browser\n")
-   # change the last line of app.py to:
-   app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
